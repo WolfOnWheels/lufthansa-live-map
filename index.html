@@ -72,8 +72,8 @@ const HOME_VIEW = { lat: 45, lng: 10, altitude: 2.2 };
 // are exaggerated for visibility; real cruise altitude would be ~0.2% of Earth's radius.
 const LAYERS = [
   { label: "0 – 3,500 m",     max: 3500,     shell: 0.06, color: "#4fd1ff" },
-  { label: "3,500 – 7,500 m", max: 7500,     shell: 0.12, color: "#a3e635" },
-  { label: "above 7,500 m",   max: Infinity, shell: 0.18, color: "#c08bff" },
+  { label: "3,500 – 9,000 m", max: 9000,     shell: 0.12, color: "#a3e635" },
+  { label: "above 9,000 m",   max: Infinity, shell: 0.18, color: "#c08bff" },
 ];
 const layerOf = d => LAYERS.find(l => (d.alt || 0) < l.max);
 
