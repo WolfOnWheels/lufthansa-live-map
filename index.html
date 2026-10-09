@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lufthansa Live Globe</title>
+<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.46.1/dist/globe.gl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<style>
+  :root {
+    --space: #040b1e;
+    --ocean: #0a1a3a;
+    --land: #13295a;
+    --border: #23407e;
+    --plane: #ffd400;
+    --text: #dbe4ff;
+  }
+  html, body { margin: 0; height: 100%; background: var(--space); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; overflow: hidden; }
+  #globe { width: 100vw; height: 100vh; }
+  .flight { position: relative; width: 0; height: 0; pointer-events: none; }
+  .flight .ring { position: absolute; border: 0.6px solid; border-radius: 50%;
+    transform: translate(-50%, -50%); pointer-events: auto; cursor: pointer; }
+  .flight svg { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; overflow: visible; }
+  .flight svg path { fill: var(--plane); }
+  .flight .label { position: absolute; top: -5px; color: var(--plane); font-size: 8px; font-weight: 600;
+    letter-spacing: .02em; white-space: nowrap; }
+  #hud { position: fixed; top: 12px; left: 12px; background: rgba(6,16,40,.85); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
+  #hud b { color: var(--plane); }
+  #hud button { margin-top: 6px; background: var(--land); color: var(--text); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+  #err { color: #ff8080; }
+  #layers { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; }
+  #layers i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px;
+    vertical-align: -1px; border: 1px solid rgba(255,255,255,.5); }
+  #zoom { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;
+    background: rgba(6,16,40,.85); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  #zoom button { width: 36px; height: 36px; background: none; color: var(--text); border: 0;
+    font-size: 20px; line-height: 1; cursor: pointer; }
+  #zoom button + button { border-top: 1px solid var(--border); }
+  #zoom button:hover { background: var(--land); color: var(--plane); }
+  #zoom #zoom-reset { font-size: 15px; }
+  #tip { position: fixed; pointer-events: none; background: rgba(6,16,40,.95); border: 1px solid var(--plane);
+    border-radius: 6px; padding: 6px 9px; font-size: 12px; display: none; white-space: nowrap; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="globe"></div>
+<div id="hud">
+  <div><b>Lufthansa (LH)</b> · airborne flights</div>
+  <div>Flights: <span id="count">–</span> · Updated: <span id="updated">–</span></div>
+  <div>Next update in <span id="next">–</span></div>
+  <div id="layers"></div>
+  <div id="err"></div>
+  <button id="refresh">Refresh now</button>
+</div>
+<div id="zoom">
+  <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+  <button id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+  <button id="zoom-reset" title="Reset view" aria-label="Reset view">⟲</button>
+</div>
+<div id="tip"></div>
+<script>
+const API_KEY = "a67be567-6409-4e50-906a-f3e5721e6e14";
+const API_URL = `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&airline_iata=LH`;
+// Note: free AirLabs plan = 1000 requests/month; 60 s polling uses ~60 requests/hour.
+const REFRESH_MS = 60 * 1000;
+const HOME_VIEW = { lat: 45, lng: 10, altitude: 2.2 };
+
+// Altitude layers: translucent shells around the globe. Shell heights (fraction of globe radius)
+// are exaggerated for visibility; real cruise altitude would be ~0.2% of Earth's radius.
+const LAYERS = [
+  { label: "0 – 3,500 m",     max: 3500,     shell: 0.06, color: "#4fd1ff" },
+  { label: "3,500 – 7,500 m", max: 7500,     shell: 0.12, color: "#a3e635" },
+  { label: "above 7,500 m",   max: Infinity, shell: 0.18, color: "#c08bff" },
+];
+const layerOf = d => LAYERS.find(l => (d.alt || 0) < l.max);
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const tip = document.getElementById("tip");
+
+const globe = Globe()(document.getElementById("globe"))
+  .backgroundColor(css("--space"))
+  .showGraticules(true)
+  .showAtmosphere(true)
+  .atmosphereColor("#3a5fb0")
+  .atmosphereAltitude(0.15)
+  .polygonCapColor(() => css("--land"))
+  .polygonSideColor(() => "rgba(0,0,0,0)")
+  .polygonStrokeColor(() => css("--border"))
+  .polygonAltitude(0.004)
+  .htmlTransitionDuration(0)
+  .htmlElementVisibilityModifier((el, visible) => { el.style.display = visible ? "" : "none"; })
+  .htmlElement(makeFlightEl)
+  .htmlLat(d => d.curLat)
+  .htmlLng(d => d.curLng)
+  .htmlAltitude(d => layerOf(d).shell)
+  .pointOfView(HOME_VIEW);
+
+globe.globeMaterial().color.set(css("--ocean"));
+globe.controls().autoRotate = false;
+
+import("https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js").then(THREE => {
+  const R = globe.getGlobeRadius();
+  for (const l of LAYERS) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(R * (1 + l.shell), 96, 64),
+      new THREE.MeshLambertMaterial({ color: l.color, transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide })
+    );
+    mesh.renderOrder = 1;
+    globe.scene().add(mesh);
+  }
+});
+
+fetch("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json")
+  .then(r => r.json())
+  .then(world => globe.polygonsData(topojson.feature(world, world.objects.countries).features));
+
+window.addEventListener("resize", () => globe.width(innerWidth).height(innerHeight));
+
+// Zoom controls
+const zoomTo = factor => {
+  const pov = globe.pointOfView();
+  globe.pointOfView({ ...pov, altitude: Math.min(6, Math.max(0.15, pov.altitude * factor)) }, 400);
+};
+document.getElementById("zoom-in").onclick = () => zoomTo(0.5);
+document.getElementById("zoom-out").onclick = () => zoomTo(2);
+document.getElementById("zoom-reset").onclick = () => globe.pointOfView(HOME_VIEW, 600);
+
+// Flights
+const PLANE = "M0,-5 L1,-1.5 L5,1 L5,2 L1,0.8 L0.7,3.5 L2,4.6 L2,5.3 L0,4.8 L-2,5.3 L-2,4.6 L-0.7,3.5 L-1,0.8 L-5,2 L-5,1 L-1,-1.5 Z";
+// Ring radius by altitude (m): ground → 6 px, cruise ~13 km → 28 px
+const ringR = alt => 6 + 22 * Math.sqrt(Math.min(Math.max(alt || 0, 0), 13000) / 13000);
+let flights = [];
+let nextAt = 0;
+
+function makeFlightEl(d) {
+  const el = document.createElement("div");
+  el.className = "flight";
+  const r = ringR(d.alt);
+  const c = layerOf(d).color;
+  el.innerHTML = `<div class="ring" style="width:${2 * r}px;height:${2 * r}px;border-color:${c};background:${c}40"></div>
+    <svg viewBox="-5 -5 10 10"><path d="${PLANE}" transform="rotate(${d.dir || 0}) scale(0.9)"/></svg>
+    <div class="label" style="left:${Math.max(6, r + 2)}px">${d.flight_iata || d.flight_icao}</div>`;
+  const ring = el.querySelector(".ring");
+  ring.addEventListener("mousemove", e => {
+    tip.style.display = "block";
+    tip.style.left = e.clientX + 14 + "px";
+    tip.style.top = e.clientY + 10 + "px";
+    tip.innerHTML = `<b style="color:#ffd400">${d.flight_iata || d.flight_icao}</b> ${d.dep_iata || "?"} → ${d.arr_iata || "?"}<br>
+      ${d.aircraft_icao || ""} ${d.reg_number || ""}<br>
+      Alt ${d.alt?.toLocaleString() ?? "–"} m · ${d.speed ?? "–"} km/h · Hdg ${Math.round(d.dir ?? 0)}°<br>
+      Layer: ${layerOf(d).label}`;
+  });
+  ring.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  return el;
+}
+
+function deadReckon(f, now) {
+  // advance along heading at ground speed (km/h) since data timestamp
+  const hours = Math.max(0, (now / 1000 - f.updated)) / 3600;
+  const dist = (f.speed || 0) * hours / 6371; // angular distance (rad)
+  const lat1 = f.lat * Math.PI / 180, lon1 = f.lng * Math.PI / 180, brg = (f.dir || 0) * Math.PI / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dist) + Math.cos(lat1) * Math.sin(dist) * Math.cos(brg));
+  const lon2 = lon1 + Math.atan2(Math.sin(brg) * Math.sin(dist) * Math.cos(lat1), Math.cos(dist) - Math.sin(lat1) * Math.sin(lat2));
+  return [((lon2 * 180 / Math.PI + 540) % 360) - 180, lat2 * 180 / Math.PI];
+}
+
+function render() {
+  const now = Date.now();
+  for (const f of flights) [f.curLng, f.curLat] = deadReckon(f, now);
+  globe.htmlElementsData(flights);
+}
+
+async function load() {
+  try {
+    const res = await fetch(API_URL);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+    flights = (json.response || []).filter(f => f.status === "en-route" && f.lat != null && f.lng != null);
+    document.getElementById("count").textContent = flights.length;
+    document.getElementById("layers").innerHTML = LAYERS.map(l =>
+      `<div><i style="background:${l.color}"></i>${l.label}: ${flights.filter(f => layerOf(f) === l).length}</div>`
+    ).reverse().join("");
+    document.getElementById("updated").textContent = new Date().toLocaleTimeString();
+    document.getElementById("err").textContent = "";
+    render();
+  } catch (e) {
+    document.getElementById("err").textContent = "Error: " + e.message;
+  }
+  nextAt = Date.now() + REFRESH_MS;
+}
+
+document.getElementById("refresh").onclick = load;
+setInterval(() => { if (Date.now() >= nextAt) load(); }, 1000);
+setInterval(() => {
+  const s = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
+  document.getElementById("next").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}, 1000);
+setInterval(render, 2000); // smooth movement between API polls
+load();
+</script>
+</body>
+</html>

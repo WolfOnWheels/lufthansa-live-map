@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lufthansa Live Map</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<style>
+  :root {
+    --ocean: #0a1a3a;
+    --land: #13295a;
+    --border: #23407e;
+    --grid: #1c3366;
+    --grid-label: #4f6aa5;
+    --plane: #ffd400;
+    --text: #dbe4ff;
+  }
+  html, body { margin: 0; height: 100%; background: var(--ocean); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; overflow: hidden; }
+  svg { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  svg:active { cursor: grabbing; }
+  .land { fill: var(--land); stroke: var(--border); stroke-width: 0.5; vector-effect: non-scaling-stroke; }
+  .grid { fill: none; stroke: var(--grid); stroke-width: 0.5; vector-effect: non-scaling-stroke; }
+  .grid-label { fill: var(--grid-label); font-size: 10px; }
+  .plane path { fill: var(--plane); }
+  .plane circle { fill: none; stroke: rgba(255,255,255,.45); stroke-width: 0.6; }
+  .plane text { fill: var(--plane); font-size: 8px; font-weight: 600; letter-spacing: .02em; }
+  #hud { position: fixed; top: 12px; left: 12px; background: rgba(6,16,40,.85); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
+  #hud b { color: var(--plane); }
+  #hud button { margin-top: 6px; background: var(--land); color: var(--text); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+  #tip { position: fixed; pointer-events: none; background: rgba(6,16,40,.95); border: 1px solid var(--plane);
+    border-radius: 6px; padding: 6px 9px; font-size: 12px; display: none; white-space: nowrap; }
+  #err { color: #ff8080; }
+  #zoom { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;
+    background: rgba(6,16,40,.85); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  #zoom button { width: 36px; height: 36px; background: none; color: var(--text); border: 0;
+    font-size: 20px; line-height: 1; cursor: pointer; }
+  #zoom button + button { border-top: 1px solid var(--border); }
+  #zoom button:hover { background: var(--land); color: var(--plane); }
+  #zoom #zoom-reset { font-size: 15px; }
+</style>
+</head>
+<body>
+<svg id="map"></svg>
+<div id="hud">
+  <div><b>Lufthansa (LH)</b> · airborne flights</div>
+  <div>Flights: <span id="count">–</span> · Updated: <span id="updated">–</span></div>
+  <div>Next update in <span id="next">–</span></div>
+  <div id="err"></div>
+  <button id="refresh">Refresh now</button>
+</div>
+<div id="zoom">
+  <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+  <button id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+  <button id="zoom-reset" title="Reset view" aria-label="Reset view">⟲</button>
+</div>
+<div id="tip"></div>
+<script>
+const API_KEY = "a67be567-6409-4e50-906a-f3e5721e6e14";
+const API_URL = `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&airline_iata=LH`;
+// Note: free AirLabs plan = 1000 requests/month; 60 s polling uses ~60 requests/hour.
+const REFRESH_MS = 60 * 1000;
+
+const svg = d3.select("#map");
+const root = svg.append("g");
+const gMap = root.append("g");
+const gPlanes = root.append("g");
+const W = 1600, H = 800;
+const projection = d3.geoEquirectangular().fitSize([W, H], { type: "Sphere" });
+const path = d3.geoPath(projection);
+svg.attr("viewBox", `0 0 ${W} ${H}`).attr("preserveAspectRatio", "xMidYMid meet");
+
+let k = 1;
+const zoom = d3.zoom().scaleExtent([1, 20]).translateExtent([[0, 0], [W, H]]).on("zoom", e => {
+  k = e.transform.k;
+  root.attr("transform", e.transform);
+  render();
+});
+svg.call(zoom);
+d3.select("#zoom-in").on("click", () => svg.transition().duration(300).call(zoom.scaleBy, 2));
+d3.select("#zoom-out").on("click", () => svg.transition().duration(300).call(zoom.scaleBy, 0.5));
+d3.select("#zoom-reset").on("click", () => svg.transition().duration(400).call(zoom.transform, d3.zoomIdentity));
+
+// Base map: graticule every 15°, labels every 30°
+gMap.append("path").datum(d3.geoGraticule().step([15, 15])()).attr("class", "grid").attr("d", path);
+d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json").then(world => {
+  gMap.insert("path", ".grid").datum(topojson.feature(world, world.objects.countries))
+    .attr("class", "land").attr("d", path);
+});
+const labels = gMap.append("g");
+for (let lon = -180; lon <= 180; lon += 30) {
+  const [x] = projection([lon, 0]);
+  labels.append("text").attr("class", "grid-label").attr("x", x + 2).attr("y", H - 4)
+    .text(`${Math.abs(lon)}°${lon < 0 ? "W" : lon > 0 ? "E" : ""}`);
+}
+for (let lat = -60; lat <= 90; lat += 30) {
+  const [, y] = projection([-180, lat]);
+  labels.append("text").attr("class", "grid-label").attr("x", 3).attr("y", y - 2)
+    .text(`${Math.abs(lat)}°${lat < 0 ? "S" : lat > 0 ? "N" : ""}`);
+}
+
+// Flights
+let flights = [];
+let fetchedAt = 0, nextAt = 0;
+
+function deadReckon(f, now) {
+  // advance along heading at ground speed (km/h) since data timestamp
+  const hours = Math.max(0, (now / 1000 - f.updated)) / 3600;
+  const dist = (f.speed || 0) * hours / 6371; // angular distance (rad)
+  const lat1 = f.lat * Math.PI / 180, lon1 = f.lng * Math.PI / 180, brg = (f.dir || 0) * Math.PI / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dist) + Math.cos(lat1) * Math.sin(dist) * Math.cos(brg));
+  const lon2 = lon1 + Math.atan2(Math.sin(brg) * Math.sin(dist) * Math.cos(lat1), Math.cos(dist) - Math.sin(lat1) * Math.sin(lat2));
+  return [((lon2 * 180 / Math.PI + 540) % 360) - 180, lat2 * 180 / Math.PI];
+}
+
+const PLANE = "M0,-5 L1,-1.5 L5,1 L5,2 L1,0.8 L0.7,3.5 L2,4.6 L2,5.3 L0,4.8 L-2,5.3 L-2,4.6 L-0.7,3.5 L-1,0.8 L-5,2 L-5,1 L-1,-1.5 Z";
+const tip = d3.select("#tip");
+// Ring radius by altitude (m): ground → 6 px, cruise ~13 km → 28 px
+const ringR = d3.scaleSqrt().domain([0, 13000]).range([6, 28]).clamp(true);
+
+function render() {
+  const now = Date.now();
+  const sel = gPlanes.selectAll("g.plane").data(flights, d => d.hex || d.flight_icao);
+  sel.exit().remove();
+  const enter = sel.enter().append("g").attr("class", "plane")
+    .on("mousemove", (e, d) => {
+      tip.style("display", "block").style("left", e.clientX + 14 + "px").style("top", e.clientY + 10 + "px")
+        .html(`<b style="color:#ffd400">${d.flight_iata || d.flight_icao}</b> ${d.dep_iata || "?"} → ${d.arr_iata || "?"}<br>
+               ${d.aircraft_icao || ""} ${d.reg_number || ""}<br>
+               Alt ${d.alt?.toLocaleString() ?? "–"} m · ${d.speed ?? "–"} km/h · Hdg ${Math.round(d.dir ?? 0)}°`);
+    })
+    .on("mouseleave", () => tip.style("display", "none"));
+  enter.append("circle");
+  enter.append("path").attr("d", PLANE);
+  enter.append("text").attr("y", 3);
+  sel.merge(enter).each(function (d) {
+    const [x, y] = projection(deadReckon(d, now));
+    const g = d3.select(this).attr("transform", `translate(${x},${y}) scale(${1 / k})`);
+    g.select("path").attr("transform", `rotate(${d.dir || 0}) scale(0.9)`);
+    const r = ringR(d.alt || 0);
+    g.select("circle").attr("r", r);
+    g.select("text").attr("x", Math.max(6, r + 2)).text(d.flight_iata || d.flight_icao);
+  });
+}
+
+async function load() {
+  try {
+    const res = await fetch(API_URL);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+    flights = (json.response || []).filter(f => f.status === "en-route" && f.lat != null && f.lng != null);
+    fetchedAt = Date.now();
+    d3.select("#count").text(flights.length);
+    d3.select("#updated").text(new Date(fetchedAt).toLocaleTimeString());
+    d3.select("#err").text("");
+    render();
+  } catch (e) {
+    d3.select("#err").text("Error: " + e.message);
+  }
+  nextAt = Date.now() + REFRESH_MS;
+}
+
+document.getElementById("refresh").onclick = load;
+setInterval(() => { if (Date.now() >= nextAt) load(); }, 1000);
+setInterval(() => {
+  const s = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
+  d3.select("#next").text(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`);
+}, 1000);
+setInterval(render, 2000); // smooth movement between API polls
+load();
+</script>
+</body>
+</html>
