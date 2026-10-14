@@ -9,8 +9,8 @@
 <style>
   :root {
     --space: #040b1e;
-    --ocean: #0a1a3a;
-    --land: #13295a;
+    --ocean: #13295a;
+    --land: #0a1a3a;
     --border: #23407e;
     --plane: #ffd400;
     --text: #dbe4ff;
@@ -28,7 +28,7 @@
   #hud { position: fixed; bottom: 12px; left: 12px; background: rgba(6,16,40,.85); border: 1px solid var(--border);
     border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
   #hud b { color: var(--plane); }
-  #hud button { margin-top: 6px; background: var(--land); color: var(--text); border: 1px solid var(--border);
+  #hud button { margin-top: 6px; background: var(--ocean); color: var(--text); border: 1px solid var(--border);
     border-radius: 5px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
   #err { color: #ff8080; }
   #hud button:disabled { opacity: .45; cursor: default; }
@@ -41,7 +41,7 @@
   #zoom button { width: 36px; height: 36px; background: none; color: var(--text); border: 0;
     font-size: 20px; line-height: 1; cursor: pointer; }
   #zoom button + button { border-top: 1px solid var(--border); }
-  #zoom button:hover { background: var(--land); color: var(--plane); }
+  #zoom button:hover { background: var(--ocean); color: var(--plane); }
   #zoom #zoom-reset { font-size: 15px; }
   #tip { position: fixed; pointer-events: none; background: rgba(6,16,40,.95); border: 1px solid var(--plane);
     border-radius: 6px; padding: 6px 9px; font-size: 12px; display: none; white-space: nowrap; z-index: 10; }
