@@ -20,17 +20,19 @@
   #globe { width: 100vw; height: 100vh; }
   .flight { position: relative; width: 0; height: 0; pointer-events: none; }
   .flight .ring { position: absolute; border: 0.6px solid; border-radius: 50%;
-    transform: translate(-50%, -50%); pointer-events: auto; cursor: pointer; }
+    transform: translate(-50%, -50%); pointer-events: auto; cursor: pointer; opacity: 0; }
   .flight svg { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; overflow: visible; }
   .flight svg path { fill: var(--plane); }
   .flight .label { position: absolute; top: -5px; color: var(--plane); font-size: 8px; font-weight: 600;
     letter-spacing: .02em; white-space: nowrap; }
-  #hud { position: fixed; top: 12px; left: 12px; background: rgba(6,16,40,.85); border: 1px solid var(--border);
+  #hud { position: fixed; bottom: 12px; left: 12px; background: rgba(6,16,40,.85); border: 1px solid var(--border);
     border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
   #hud b { color: var(--plane); }
   #hud button { margin-top: 6px; background: var(--land); color: var(--text); border: 1px solid var(--border);
     border-radius: 5px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
   #err { color: #ff8080; }
+  #hud button:disabled { opacity: .45; cursor: default; }
+  body.rings-static .flight .ring { opacity: 1; }
   #layers { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; }
   #layers i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px;
     vertical-align: -1px; border: 1px solid rgba(255,255,255,.5); }
@@ -54,6 +56,9 @@
   <div id="layers"></div>
   <div id="err"></div>
   <button id="refresh">Refresh now</button>
+  <button id="show-rings">Show all rings</button>
+  <button id="play-again" disabled>Play again</button>
+  <button id="sound">Sound: on</button>
 </div>
 <div id="zoom">
   <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
@@ -66,14 +71,17 @@ const API_KEY = "a67be567-6409-4e50-906a-f3e5721e6e14";
 const API_URL = `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&airline_iata=LH`;
 // Note: free AirLabs plan = 1000 requests/month; 60 s polling uses ~60 requests/hour.
 const REFRESH_MS = 60 * 1000;
-const HOME_VIEW = { lat: 45, lng: 10, altitude: 2.2 };
+const START_VIEW = { lat: 20, lng: -30, altitude: 3 };
+// Camera aimed south-east of Europe, so Europe lands in the top-left of the view
+const HOME_VIEW = { lat: 40, lng: 24, altitude: 1.3 };
+const INTRO_MS = 5000;
 
 // Altitude layers: translucent shells around the globe. Shell heights (fraction of globe radius)
 // are exaggerated for visibility; real cruise altitude would be ~0.2% of Earth's radius.
 const LAYERS = [
-  { label: "0 – 3,500 m",     max: 3500,     shell: 0.06, color: "#4fd1ff" },
-  { label: "3,500 – 9,000 m", max: 9000,     shell: 0.12, color: "#a3e635" },
-  { label: "above 9,000 m",   max: Infinity, shell: 0.18, color: "#c08bff" },
+  { label: "0 – 3,500 m",     max: 3500,     shell: 0.06, color: "#4fd1ff", tone: 587 }, // D5
+  { label: "3,500 – 9,000 m", max: 9000,     shell: 0.12, color: "#a3e635", tone: 880 }, // A5
+  { label: "above 9,000 m",   max: Infinity, shell: 0.18, color: "#c08bff", tone: 1319 }, // E6
 ];
 const layerOf = d => LAYERS.find(l => (d.alt || 0) < l.max);
 
@@ -96,10 +104,15 @@ const globe = Globe()(document.getElementById("globe"))
   .htmlLat(d => d.curLat)
   .htmlLng(d => d.curLng)
   .htmlAltitude(d => layerOf(d).shell)
-  .pointOfView(HOME_VIEW);
+  .pointOfView(START_VIEW);
 
 globe.globeMaterial().color.set(css("--ocean"));
 globe.controls().autoRotate = false;
+function playIntro() { // swing to Europe and zoom in
+  globe.pointOfView(START_VIEW);
+  setTimeout(() => globe.pointOfView(HOME_VIEW, INTRO_MS), 800);
+}
+playIntro();
 
 import("https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js").then(THREE => {
   const R = globe.getGlobeRadius();
@@ -144,6 +157,7 @@ function makeFlightEl(d) {
     <svg viewBox="-5 -5 10 10"><path d="${PLANE}" transform="rotate(${d.dir || 0}) scale(0.9)"/></svg>
     <div class="label" style="left:${Math.max(6, r + 2)}px">${d.flight_iata || d.flight_icao}</div>`;
   const ring = el.querySelector(".ring");
+  d.ringEl = ring;
   ring.addEventListener("mousemove", e => {
     tip.style.display = "block";
     tip.style.left = e.clientX + 14 + "px";
@@ -167,6 +181,69 @@ function deadReckon(f, now) {
   return [((lon2 * 180 / Math.PI + 540) % 360) - 180, lat2 * 180 / Math.PI];
 }
 
+// Sonar ping per ring: sine tone with a fast attack, long decay and a filtered echo.
+// Sound is on by default, but browsers only allow audio after the first click/tap/key press,
+// so the audio context is resumed on the first interaction with the page.
+let audio = null, master = null, soundOn = true;
+function initAudio() {
+  audio = new AudioContext();
+  master = audio.createGain();
+  master.gain.value = 0.5;
+  const echo = audio.createDelay(1);
+  echo.delayTime.value = 0.32;
+  const feedback = audio.createGain();
+  feedback.gain.value = 0.35;
+  const damp = audio.createBiquadFilter();
+  damp.type = "lowpass";
+  damp.frequency.value = 2200;
+  master.connect(audio.destination);
+  master.connect(echo);
+  echo.connect(damp).connect(feedback).connect(echo);
+  damp.connect(audio.destination);
+}
+function ping(freq) {
+  const t = audio.currentTime;
+  const osc = audio.createOscillator();
+  const env = audio.createGain();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(freq, t);
+  osc.frequency.exponentialRampToValueAtTime(freq * 0.97, t + 1.2); // slight downward glide
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.exponentialRampToValueAtTime(0.25, t + 0.006);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+  osc.connect(env).connect(master);
+  osc.start(t);
+  osc.stop(t + 1.5);
+}
+
+// Rings are hidden; pulse one at a time (quick fade in, slow fade out while growing), sweeping west → east
+// through the flights currently on screen.
+const PULSE_EVERY_MS = 200;
+const PULSE_MS = 2600;
+const PULSE_GROW = 1.5; // ring grows to 150% over the pulse
+let pulseOrder = [], pulseIdx = 0;
+let pulsing = true;
+setInterval(() => {
+  if (!pulsing) return;
+  for (let tries = 0; tries < pulseOrder.length; tries++) {
+    const f = pulseOrder[pulseIdx++ % pulseOrder.length];
+    const ring = f.ringEl;
+    if (!ring || !ring.isConnected || ring.parentElement.style.display === "none") continue;
+    const b = ring.getBoundingClientRect();
+    if (b.right < 0 || b.bottom < 0 || b.left > innerWidth || b.top > innerHeight) continue;
+    ring.animate(
+      [
+        { opacity: 0, transform: "translate(-50%, -50%) scale(1)", easing: "ease-out" },
+        { opacity: 1, transform: "translate(-50%, -50%) scale(1.04)", offset: 0.08, easing: "ease-out" },
+        { opacity: 0, transform: `translate(-50%, -50%) scale(${PULSE_GROW})` },
+      ],
+      { duration: PULSE_MS }
+    );
+    if (soundOn && audio?.state === "running") ping(layerOf(f).tone);
+    return;
+  }
+}, PULSE_EVERY_MS);
+
 function render() {
   const now = Date.now();
   for (const f of flights) [f.curLng, f.curLat] = deadReckon(f, now);
@@ -179,6 +256,8 @@ async function load() {
     const json = await res.json();
     if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
     flights = (json.response || []).filter(f => f.status === "en-route" && f.lat != null && f.lng != null);
+    pulseOrder = [...flights].sort((a, b) => a.lng - b.lng);
+    pulseIdx = 0;
     document.getElementById("count").textContent = flights.length;
     document.getElementById("layers").innerHTML = LAYERS.map(l =>
       `<div><i style="background:${l.color}"></i>${l.label}: ${flights.filter(f => layerOf(f) === l).length}</div>`
@@ -193,6 +272,38 @@ async function load() {
 }
 
 document.getElementById("refresh").onclick = load;
+
+// "Show all rings" stops the pulses and shows every ring; "Play again" replays intro + pulses.
+const showBtn = document.getElementById("show-rings");
+const playBtn = document.getElementById("play-again");
+showBtn.onclick = () => {
+  pulsing = false;
+  for (const f of flights) f.ringEl?.getAnimations().forEach(a => a.cancel());
+  document.body.classList.add("rings-static");
+  showBtn.disabled = true;
+  playBtn.disabled = false;
+};
+const soundBtn = document.getElementById("sound");
+soundBtn.onclick = () => {
+  soundOn = !soundOn;
+  if (soundOn) audio.resume();
+  soundBtn.textContent = `Sound: ${soundOn ? "on" : "off"}`;
+};
+initAudio();
+audio.resume().catch(() => {});
+const unlockAudio = () => {
+  if (soundOn) audio.resume();
+  for (const ev of ["pointerdown", "keydown"]) removeEventListener(ev, unlockAudio, true);
+};
+for (const ev of ["pointerdown", "keydown"]) addEventListener(ev, unlockAudio, true);
+playBtn.onclick = () => {
+  document.body.classList.remove("rings-static");
+  pulseIdx = 0;
+  pulsing = true;
+  showBtn.disabled = false;
+  playBtn.disabled = true;
+  playIntro();
+};
 setInterval(() => { if (Date.now() >= nextAt) load(); }, 1000);
 setInterval(() => {
   const s = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
